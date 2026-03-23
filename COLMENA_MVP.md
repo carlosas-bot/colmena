@@ -25,11 +25,11 @@ Colmena orchestrates a team of AI agents to work on software projects. You defin
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  Tasks.md (UI)                                   │
+│  Tasks.md (Docker container)                     │
 │  Kanban board: Draft→Backlog→Todo→...→Done       │
 │  Reads/writes markdown files on shared volume     │
 ├──────────────────────────────────────────────────┤
-│  Colmena Server (Express + Node.js)              │
+│  Colmena Server (Docker container)               │
 │  ┌─────────┐ ┌───────────┐ ┌──────────────────┐ │
 │  │ REST API│ │ Scheduler │ │ Heartbeat Engine │ │
 │  └─────────┘ └───────────┘ └──────────────────┘ │
@@ -37,23 +37,24 @@ Colmena orchestrates a team of AI agents to work on software projects. You defin
 │  │ Secrets │ │ Task Sync │ │ Approval Gate    │ │
 │  └─────────┘ └───────────┘ └──────────────────┘ │
 ├──────────────────────────────────────────────────┤
-│  Colmena Web UI (React)                          │
+│  Colmena Web UI (Docker container)               │
 │  Agent management + Run viewer                   │
 ├──────────────────────────────────────────────────┤
-│  PostgreSQL (embedded PGlite or external)        │
+│  PostgreSQL 17 (Docker container)                │
 ├──────────────────────────────────────────────────┤
-│  Filesystem                                      │
-│  └── /tasks/  ← shared with Tasks.md            │
-│      ├── Draft/                                  │
-│      ├── Backlog/                                │
-│      ├── Todo/                                   │
-│      ├── In Progress/                            │
-│      ├── In Review/                              │
-│      └── Done/                                   │
+│  Shared Volumes                                  │
+│  ├── /tasks/  ← shared Colmena ↔ Tasks.md       │
+│  │   ├── Draft/                                  │
+│  │   ├── Backlog/                                │
+│  │   ├── Todo/                                   │
+│  │   ├── In Progress/                            │
+│  │   ├── In Review/                              │
+│  │   └── Done/                                   │
+│  └── /workspace/ ← agent code projects           │
 └──────────────────────────────────────────────────┘
 ```
 
-**Key integration:** Colmena and Tasks.md share the same `/tasks/` directory. Colmena writes task markdown files; Tasks.md renders them as a kanban board. Moving a card in Tasks.md moves the file between lane directories. Colmena watches the filesystem for changes.
+**Key integration:** All services run in Docker. Colmena and Tasks.md share the same `/tasks/` volume. Colmena writes task markdown files; Tasks.md renders them as a kanban board. Moving a card in Tasks.md moves the file between lane directories. Colmena watches the filesystem for changes.
 
 ---
 
@@ -749,22 +750,58 @@ colmena secret set <name>        # Set a secret interactively
 
 ## 14. Docker Deployment
 
-### 14.1 Docker Compose
+### 14.1 Docker Compose (Development)
 
 ```yaml
-version: "3"
 services:
-  colmena:
-    build: .
+  server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile.dev
+    volumes:
+      - ./server/src:/app/server/src
+      - ./packages:/app/packages
+      - ./skills:/app/skills
+      - /app/node_modules
+      - colmena_data:/colmena
+      - ./tasks:/tasks
+      - ./workspace:/workspace
     ports:
       - "3100:3100"
-    environment:
-      - HOST=0.0.0.0
-      - COLMENA_HOME=/colmena
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui/Dockerfile.dev
     volumes:
-      - ./data:/colmena
-      - ./tasks:/tasks         # Shared with Tasks.md
-      - ./workspace:/workspace # Agent working directory
+      - ./ui/src:/app/ui/src
+      - ./packages:/app/packages
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    env_file: .env
+    depends_on:
+      - server
+
+  db:
+    image: postgres:17-alpine
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: colmena
+      POSTGRES_PASSWORD: colmena
+      POSTGRES_DB: colmena
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U colmena"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   tasks-md:
     image: baldissaramatheus/tasks.md
@@ -775,10 +812,14 @@ services:
       - PGID=1000
       - TITLE=Colmena Board
     volumes:
-      - ./tasks:/tasks         # Shared with Colmena
+      - ./tasks:/tasks
+
+volumes:
+  db_data:
+  colmena_data:
 ```
 
-Both containers share the `/tasks` volume. Colmena writes task files; Tasks.md renders them.
+All services run in Docker. Server, UI, DB, and Tasks.md share volumes for tasks and workspace data. `docker compose -f docker-compose.dev.yml up` starts everything.
 
 ---
 
@@ -827,16 +868,28 @@ Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
 ## 16. Data Directory Layout
 
 ```
-~/.colmena/                        # COLMENA_HOME
+/colmena/                          # COLMENA_HOME (Docker volume)
 ├── config.json                    # Server configuration
 ├── secrets/
 │   └── master.key                 # Encryption master key (0600)
-├── db/                            # Embedded PostgreSQL data
 ├── run-logs/                      # Heartbeat run log files
 └── agents/
     └── {agentId}/
         └── instructions/          # Agent AGENTS.md files
+
+/tasks/                            # Shared volume (Colmena ↔ Tasks.md)
+├── Draft/
+├── Backlog/
+├── Todo/
+├── In Progress/
+├── In Review/
+└── Done/
+
+/workspace/                        # Agent code projects volume
+└── my-project/
 ```
+
+All data directories are Docker volumes — no local filesystem dependency.
 
 ---
 
@@ -844,40 +897,41 @@ Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
 
 ### Phase 1: Foundation (Week 1-2)
 
-1. **Project scaffolding** — monorepo with `server/`, `packages/db/`, `packages/shared/`
-2. **Database** — embedded Postgres, Drizzle schema for all tables, auto-migrations
-3. **Config system** — config file + env var loading
-4. **Secrets** — local_encrypted provider, CRUD API, env var resolution
-5. **Activity log** — append-only log + WebSocket event publishing
+1. **Docker setup** — `docker-compose.dev.yml` with Postgres 17 + server + UI containers, Dockerfiles (dev + prod), `.env.example`
+2. **Project scaffolding** — pnpm monorepo with `server/src/modules/`, `packages/db/`, `packages/shared/`, `docker/`
+3. **Database** — Drizzle schema for all tables (Section 9), migrations, `DATABASE_URL` connection
+4. **Config system** — env var loading with Zod validation (fail fast)
+5. **Error handling** — `AppError` hierarchy + global error middleware
+6. **Secrets** — local_encrypted provider, repository + service + controller, CRUD API, env var resolution
+7. **Activity log** — repository + service + `logActivity()`, WebSocket event publishing
 
 ### Phase 2: Task System (Week 2-3)
 
-6. **Goals & Epics** — CRUD API
-7. **Tasks** — CRUD API with filesystem sync (write .md files to lane directories)
-8. **Filesystem watcher** — detect Tasks.md edits and moves, sync to DB
-9. **Task identifiers** — auto-incrementing TASK-N
-10. **Approval gate** — approval status in frontmatter, API endpoints
-11. **Atomic checkout** — conditional UPDATE, 409 on conflict
+8. **Goals & Epics** — repository + service + controller + router, CRUD API
+9. **Tasks** — repository + service + controller, CRUD API with filesystem sync (write .md files to lane directories)
+10. **Filesystem watcher** — detect Tasks.md edits and moves, sync to DB (chokidar)
+11. **Task identifiers** — auto-incrementing TASK-N
+12. **Approval gate** — approval status in frontmatter, approve/reject endpoints
+13. **Atomic checkout** — conditional UPDATE in repository, 409 on conflict
 
 ### Phase 3: Agent Orchestration (Week 3-4)
 
-12. **Agent CRUD** — create, configure, pause/resume/terminate
-13. **Claude Code adapter** — execute function, stdout/stderr capture, session persistence
-14. **Heartbeat engine** — trigger → enqueue → execute → record pipeline
-15. **Run tracking** — heartbeat_runs + heartbeat_run_events tables
-16. **Session persistence** — save/restore agent sessions across heartbeats
-17. **Colmena skill** — built-in agent protocol instructions
-18. **Scheduler** — timer-based heartbeat triggering
+14. **Agent module** — repository + service + controller, CRUD + pause/resume/terminate
+15. **Claude Code adapter** — execute function, stdout/stderr capture, session persistence
+16. **Heartbeat engine** — trigger → enqueue → execute → record pipeline
+17. **Run tracking** — heartbeat_runs + heartbeat_run_events (repository + service)
+18. **Session persistence** — agent_runtime_state repository, save/restore across heartbeats
+19. **Colmena skill** — built-in agent protocol instructions
+20. **Scheduler** — timer-based heartbeat triggering
 
 ### Phase 4: UI + Polish (Week 4-5)
 
-19. **Agent management UI** — list, create, configure, invoke
-20. **Run viewer** — streaming log viewer via WebSocket
-21. **Dashboard** — agent status, pending approvals, recent runs
-22. **Secrets UI** — manage global/agent-scoped secrets
-23. **Goals/Epics UI** — simple CRUD pages
-24. **CLI** — `colmena init`, `start`, `doctor`, `agent invoke`, `task approve`
-25. **Docker Compose** — Colmena + Tasks.md + shared volume
+21. **Agent management UI** — list, create, configure, invoke
+22. **Run viewer** — streaming log viewer via WebSocket
+23. **Dashboard** — agent status, pending approvals, recent runs
+24. **Secrets UI** — manage global/agent-scoped secrets
+25. **Goals/Epics UI** — simple CRUD pages
+26. **Tasks.md integration** — Docker Compose with shared `/tasks` volume, verify two-way sync
 
 ---
 
@@ -911,14 +965,16 @@ Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
 
 The MVP is done when:
 
-1. ✅ Operator can define Goals → Epics → Tasks
-2. ✅ Tasks appear as markdown files in Tasks.md kanban board
-3. ✅ Moving cards in Tasks.md updates Colmena status
-4. ✅ Operator can create and configure Claude Code agents
-5. ✅ Operator can approve tasks before agents work on them
-6. ✅ Agents wake up on heartbeats, check assignments, checkout tasks, do work, update status
-7. ✅ Agents can create sub-tasks (with pending approval)
-8. ✅ Agent sessions persist across heartbeats
-9. ✅ Secrets (global + agent-scoped) are encrypted and injected as env vars
-10. ✅ Run viewer shows streaming agent output in real-time
-11. ✅ Docker Compose runs Colmena + Tasks.md with shared task volume
+1. ✅ `docker compose -f docker-compose.dev.yml up` starts the full stack (server, UI, DB, Tasks.md)
+2. ✅ Operator can define Goals → Epics → Tasks
+3. ✅ Tasks appear as markdown files in Tasks.md kanban board
+4. ✅ Moving cards in Tasks.md updates Colmena status
+5. ✅ Operator can create and configure Claude Code agents
+6. ✅ Operator can approve tasks before agents work on them
+7. ✅ Agents wake up on heartbeats, check assignments, checkout tasks, do work, update status
+8. ✅ Agents can create sub-tasks (with pending approval)
+9. ✅ Agent sessions persist across heartbeats
+10. ✅ Secrets (global + agent-scoped) are encrypted and injected as env vars
+11. ✅ Run viewer shows streaming agent output in real-time
+12. ✅ All code follows controller → service → repository layered architecture
+13. ✅ All services run in Docker — no local installation required

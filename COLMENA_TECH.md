@@ -13,7 +13,7 @@
 - Apply the principle of least surprise: a function's behavior should be predictable from its name and signature.
 - Design for change: external dependencies (databases, APIs, services) must sit behind abstractions that allow substitution.
 - Every module, function, or component should have a single reason to change (SRP).
-- **Local development runs natively** with `pnpm dev` (embedded Postgres, no Docker required). **Production runs in Docker.**
+- **Everything runs in Docker.** No service, database, or tool should require local installation beyond Docker and Docker Compose.
 
 ### 1.2 Language & Naming Conventions
 
@@ -35,15 +35,23 @@
 
 ### 2.1 Core Principle
 
-Production and CI environments MUST be containerized. Local development uses `pnpm dev` with embedded PostgreSQL for zero-config startup. Docker is the production deployment path.
+The entire development and production environment MUST be containerized. A new developer should be able to clone the repo, run `docker compose -f docker-compose.dev.yml up`, and have the full stack running — no other local dependency required apart from Docker itself.
 
 ### 2.2 Project Structure
 
 ```
-├── Dockerfile                      # Multi-stage production build (monorepo)
-├── docker-compose.yml              # Production: Colmena + Tasks.md + shared /tasks volume
-├── docker-compose.dev.yml          # Development: optional Docker-based dev
-├── docker-compose.test.yml         # Test environment
+├── docker/
+│   ├── server/
+│   │   ├── Dockerfile              # Multi-stage production build
+│   │   └── Dockerfile.dev          # Development with hot reload
+│   ├── ui/
+│   │   ├── Dockerfile              # Multi-stage production build
+│   │   └── Dockerfile.dev          # Development with hot reload
+│   └── nginx/
+│       └── nginx.conf              # Reverse proxy (production)
+├── docker-compose.yml              # Production: Colmena + Tasks.md + Postgres + nginx
+├── docker-compose.dev.yml          # Development: hot reload, bind mounts
+├── docker-compose.test.yml         # Test environment (ephemeral DB)
 ├── .dockerignore
 └── .env.example                    # Template for required env vars
 ```
@@ -53,14 +61,10 @@ Production and CI environments MUST be containerized. Local development uses `pn
 #### Multi-stage builds are mandatory for production images
 
 ```dockerfile
-# ── Stage 1: Base ────────────────────────────────────────────────
-FROM node:22-alpine AS base
-RUN apk add --no-cache ca-certificates curl git
-RUN corepack enable
-
-# ── Stage 2: Dependencies ────────────────────────────────────────
-FROM base AS deps
+# ── Stage 1: Dependencies ────────────────────────────────────────
+FROM node:22-alpine AS deps
 WORKDIR /app
+RUN corepack enable
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY server/package.json server/
 COPY ui/package.json ui/
@@ -68,70 +72,189 @@ COPY packages/shared/package.json packages/shared/
 COPY packages/db/package.json packages/db/
 RUN pnpm install --frozen-lockfile
 
-# ── Stage 3: Build ───────────────────────────────────────────────
-FROM base AS build
+# ── Stage 2: Build ───────────────────────────────────────────────
+FROM node:22-alpine AS build
 WORKDIR /app
+RUN corepack enable
 COPY --from=deps /app /app
 COPY . .
 RUN pnpm --filter @colmena/ui build
 RUN pnpm --filter @colmena/server build
 
-# ── Stage 4: Production ─────────────────────────────────────────
-FROM base AS production
+# ── Stage 3: Production ─────────────────────────────────────────
+FROM node:22-alpine AS production
 WORKDIR /app
-COPY --chown=node:node --from=build /app /app
-RUN npm install --global @anthropic-ai/claude-code@latest \
-  && mkdir -p /colmena && chown node:node /colmena
+RUN apk add --no-cache ca-certificates curl git \
+  && corepack enable \
+  && addgroup -g 1001 appgroup && adduser -u 1001 -G appgroup -s /bin/sh -D appuser \
+  && npm install --global @anthropic-ai/claude-code@latest \
+  && mkdir -p /colmena && chown appuser:appgroup /colmena
+COPY --from=build --chown=appuser:appgroup /app/dist ./dist
+COPY --from=build --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=build --chown=appuser:appgroup /app/package.json ./
+COPY --from=build --chown=appuser:appgroup /app/skills ./skills
 
-ENV NODE_ENV=production \
-    HOME=/colmena \
-    HOST=0.0.0.0 \
-    PORT=3100 \
-    SERVE_UI=true \
-    COLMENA_HOME=/colmena
-
-VOLUME ["/colmena", "/tasks"]
+ENV NODE_ENV=production
+VOLUME ["/colmena", "/tasks", "/workspace"]
 EXPOSE 3100
 
-USER node
+USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:3100/api/health || exit 1
-CMD ["node", "server/dist/index.js"]
+CMD ["node", "dist/server.js"]
+```
+
+#### Development Dockerfile
+
+```dockerfile
+# docker/server/Dockerfile.dev
+FROM node:22-alpine
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY server/package.json server/
+COPY packages/shared/package.json packages/shared/
+COPY packages/db/package.json packages/db/
+RUN pnpm install
+COPY . .
+CMD ["pnpm", "dev:server"]
+```
+
+```dockerfile
+# docker/ui/Dockerfile.dev
+FROM node:22-alpine
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY ui/package.json ui/
+COPY packages/shared/package.json packages/shared/
+RUN pnpm install
+COPY . .
+CMD ["pnpm", "dev:ui"]
 ```
 
 #### Mandatory Dockerfile rules
 
 - Always use `node:22-alpine` (pinned major version, alpine for size).
-- Use `pnpm install --frozen-lockfile` for deterministic builds.
-- Run the application as a non-root user (`node`) in production images.
+- Use `pnpm install --frozen-lockfile` for deterministic builds (production); `pnpm install` for dev.
+- Run the application as a non-root user in production images.
 - Always include a `HEALTHCHECK` instruction.
 - Copy `package.json` and lock file before source code to leverage Docker layer caching.
-- Production images must NOT contain devDependencies, test files, or `.env` files.
+- Production images must NOT contain devDependencies, source code, test files, or `.env` files.
 - Pre-install Claude Code CLI globally in the production image.
+- Development images use bind mounts (volumes) for hot reload — source code is NOT copied in `docker-compose.dev.yml`.
 
 ### 2.4 Docker Compose
+
+#### Development (`docker-compose.dev.yml`)
+
+```yaml
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile.dev
+    volumes:
+      - ./server/src:/app/server/src           # Hot reload
+      - ./packages:/app/packages               # Hot reload
+      - ./skills:/app/skills                   # Skills
+      - /app/node_modules                      # Prevent overwrite
+      - colmena_data:/colmena
+      - ./tasks:/tasks
+      - ./workspace:/workspace
+    ports:
+      - "${COLMENA_PORT:-3100}:3100"
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui/Dockerfile.dev
+    volumes:
+      - ./ui/src:/app/ui/src                   # Hot reload
+      - ./packages:/app/packages               # Hot reload
+      - /app/node_modules
+    ports:
+      - "${UI_PORT:-5173}:5173"
+    env_file: .env
+    depends_on:
+      - server
+
+  db:
+    image: postgres:17-alpine
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${DB_USER:-colmena}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-colmena}
+      POSTGRES_DB: ${DB_NAME:-colmena}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-colmena}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  tasks-md:
+    image: baldissaramatheus/tasks.md
+    ports:
+      - "${TASKS_PORT:-8080}:8080"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TITLE=Colmena Board
+    volumes:
+      - ./tasks:/tasks
+
+volumes:
+  db_data:
+  colmena_data:
+```
 
 #### Production (`docker-compose.yml`)
 
 ```yaml
 services:
-  colmena:
-    build: .
+  server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
     ports:
       - "${COLMENA_PORT:-3100}:3100"
     environment:
-      - HOST=0.0.0.0
-      - COLMENA_HOME=/colmena
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      DATABASE_URL: postgres://${DB_USER:-colmena}:${DB_PASSWORD:-colmena}@db:5432/${DB_NAME:-colmena}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      COLMENA_HOME: /colmena
     volumes:
-      - ./data:/colmena
+      - colmena_data:/colmena
       - ./tasks:/tasks
       - ./workspace:/workspace
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  db:
+    image: postgres:17-alpine
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${DB_USER:-colmena}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-colmena}
+      POSTGRES_DB: ${DB_NAME:-colmena}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-colmena}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   tasks-md:
     image: baldissaramatheus/tasks.md
@@ -144,20 +267,25 @@ services:
     volumes:
       - ./tasks:/tasks
     depends_on:
-      colmena:
+      server:
         condition: service_healthy
 
-volumes: {}
+volumes:
+  db_data:
+  colmena_data:
 ```
 
 #### Docker Compose rules
 
 - Every service MUST have a `healthcheck`.
-- Use `depends_on` with `condition: service_healthy`.
+- Use `depends_on` with `condition: service_healthy` — never plain `depends_on`.
+- Use named volumes for persistent data (databases). Never bind-mount database data directories.
 - All port mappings use environment variables with sensible defaults.
 - No hardcoded credentials — use `.env` file (gitignored) with `.env.example` as template.
+- Infrastructure services (DB) use official Alpine images with a pinned major version.
 - Colmena and Tasks.md share the `/tasks` volume for filesystem-based task sync.
 - The `/workspace` volume is where agents' code projects live.
+- Development uses bind mounts for hot reload; production uses COPY in Dockerfile.
 
 ### 2.5 .dockerignore
 
@@ -169,46 +297,68 @@ build
 .env
 .env.*
 !.env.example
+*.md
+.vscode
+.idea
 coverage
 .nyc_output
 ```
+
+- The `.dockerignore` MUST exist and MUST exclude `node_modules`, `.git`, and environment files.
 
 ### 2.6 Testing Environment
 
 ```yaml
 # docker-compose.test.yml
 services:
-  test:
+  test-server:
     build:
       context: .
-      target: build
+      dockerfile: docker/server/Dockerfile.dev
     command: pnpm test:run
+    env_file: .env.test
+    depends_on:
+      test-db:
+        condition: service_healthy
+
+  test-db:
+    image: postgres:17-alpine
     environment:
-      - NODE_ENV=test
-    tmpfs:
-      - /tmp/colmena-test-db    # In-memory embedded Postgres for speed
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: colmena_test
+    tmpfs: /var/lib/postgresql/data     # In-memory for speed
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
 ```
 
-- Tests use embedded PostgreSQL (same as development) — no separate Postgres container needed.
+- Test databases use `tmpfs` mounts for speed — data is ephemeral.
 - Tests run inside containers in CI, using the same images as development.
+- A single command runs the full test suite: `docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from test-server`.
 
 ### 2.7 Local Development Workflow
 
 ```bash
 # First time setup
-cp .env.example .env                     # Configure environment
-pnpm install                             # Install dependencies
-pnpm dev                                 # Start server + UI (embedded Postgres, zero config)
+cp .env.example .env                                    # Configure environment
+docker compose -f docker-compose.dev.yml up -d          # Start all services
 
 # Daily development
-pnpm dev                                 # Start everything
-pnpm test:run                            # Run tests
-pnpm typecheck                           # Type checking
-pnpm db:generate                         # Generate migration after schema change
-pnpm db:migrate                          # Apply migrations
+docker compose -f docker-compose.dev.yml up -d          # Start
+docker compose -f docker-compose.dev.yml logs -f server # Tail logs
+docker compose -f docker-compose.dev.yml down           # Stop
 
-# Docker deployment
-docker compose up --build                # Production with Tasks.md
+# Run tests
+docker compose -f docker-compose.test.yml up --abort-on-container-exit
+
+# Run a one-off command (e.g., migrations)
+docker compose -f docker-compose.dev.yml exec server pnpm db:migrate
+
+# Rebuild after dependency changes
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
 ---
@@ -273,19 +423,30 @@ docker compose up --build                # Production with Tasks.md
 colmena/
 ├── server/                      # Express.js API server
 │   ├── src/
-│   │   ├── routes/              # HTTP layer: request parsing, validation, response
-│   │   ├── services/            # Pure business logic + Drizzle queries
+│   │   ├── modules/             # Domain modules (feature-based)
+│   │   │   └── <module>/
+│   │   │       ├── <module>.controller.ts    # HTTP layer: request parsing, response
+│   │   │       ├── <module>.service.ts       # Pure business logic
+│   │   │       ├── <module>.repository.ts    # Data access (Drizzle queries)
+│   │   │       ├── <module>.router.ts        # Route definitions
+│   │   │       ├── <module>.schema.ts        # Zod validation schemas
+│   │   │       ├── <module>.types.ts         # Module-specific types
+│   │   │       └── __tests__/
 │   │   ├── adapters/            # Agent runtime adapters (claude_local)
-│   │   ├── middleware/          # Auth, logging, validation, error handling
-│   │   ├── secrets/             # Secret provider implementations
-│   │   ├── storage/             # File storage (run logs)
-│   │   ├── realtime/            # WebSocket server
-│   │   ├── config.ts            # Configuration loader
-│   │   ├── app.ts               # Express app composition
-│   │   └── index.ts             # Entry point
+│   │   ├── shared/
+│   │   │   ├── errors/          # Custom error classes
+│   │   │   ├── middleware/      # Auth, logging, error handling
+│   │   │   └── config/         # Configuration and env vars
+│   │   ├── infra/
+│   │   │   ├── database/        # Connection, migrations
+│   │   │   ├── secrets/         # Secret provider implementations
+│   │   │   ├── storage/         # File storage (run logs)
+│   │   │   └── realtime/        # WebSocket server
+│   │   ├── app.ts               # Application composition
+│   │   └── server.ts            # Entry point (bootstrap only)
 │   └── package.json
 │
-├── ui/                          # React SPA (served by Express in production)
+├── ui/                          # React SPA
 │   ├── src/
 │   │   ├── pages/               # Route pages
 │   │   ├── components/
@@ -317,8 +478,19 @@ colmena/
 │   └── colmena/
 │       └── SKILL.md
 │
-├── Dockerfile
-├── docker-compose.yml
+├── docker/                      # Docker configurations
+│   ├── server/
+│   │   ├── Dockerfile
+│   │   └── Dockerfile.dev
+│   ├── ui/
+│   │   ├── Dockerfile
+│   │   └── Dockerfile.dev
+│   └── nginx/
+│       └── nginx.conf
+│
+├── docker-compose.yml           # Production
+├── docker-compose.dev.yml       # Development
+├── docker-compose.test.yml      # Testing
 ├── pnpm-workspace.yaml
 ├── package.json
 └── tsconfig.base.json
@@ -328,50 +500,67 @@ colmena/
 
 | Layer | Responsibility | Knows about |
 |---|---|---|
-| **Route** | Parse request, validate with Zod, invoke service, format response | Service, Validators |
-| **Service** | Business logic + database queries via Drizzle | Drizzle ORM, other services |
+| **Router** | Define routes and attach middleware | Controller |
+| **Controller** | Parse request, invoke service, format response | Service, Schema |
+| **Service** | Pure business logic. No direct HTTP or database access | Repository (via injection) |
+| **Repository** | Encapsulate database queries. Returns domain entities | Drizzle ORM (infra/database) |
 
-**Key difference from traditional layered architecture:** Colmena follows Paperclip's pattern where services use Drizzle ORM directly — there is no separate repository layer. This is intentional:
-
-- Drizzle provides a type-safe query builder that IS the data access abstraction.
-- Adding a repository layer on top of Drizzle would be unnecessary indirection for this project's scope.
-- Services receive a `Db` instance (Drizzle client) via dependency injection, keeping them testable.
+- The controller NEVER contains business logic.
+- The service NEVER accesses `req`, `res`, or sends HTTP responses.
+- The repository NEVER contains business logic; it only translates between the persistence model and the domain.
+- The service NEVER uses Drizzle directly; all database access goes through repositories.
 
 ```typescript
-// ✅ Colmena pattern: service uses Drizzle directly
-export function taskService(db: Db) {
+// ✅ Repository: encapsulates Drizzle queries
+export function createTaskRepository(db: Db): TaskRepository {
   return {
-    list: async (filters?: TaskFilters) => {
+    async findByFilters(filters?: TaskFilters) {
       const conditions = [eq(tasks.status, "todo")];
       if (filters?.assignee) conditions.push(eq(tasks.assigneeAgentId, filters.assignee));
       return db.select().from(tasks).where(and(...conditions));
     },
-    create: async (data: CreateTaskInput) => {
+    async create(data: CreateTaskInput) {
       return db.insert(tasks).values(data).returning().then(rows => rows[0]);
+    },
+    async checkoutAtomically(taskId: string, agentId: string, runId: string) {
+      return db.update(tasks).set({ ... }).where(and(...)).returning();
+    },
+  };
+}
+
+// ✅ Service: pure business logic, receives repository
+export function createTaskService(deps: {
+  taskRepository: TaskRepository;
+  fileSync: TaskFileSync;
+}): TaskService {
+  return {
+    async checkout(taskId: string, agentId: string, runId: string) {
+      const task = await deps.taskRepository.checkoutAtomically(taskId, agentId, runId);
+      if (!task) throw new ConflictError("Task checkout conflict");
+      await deps.fileSync.moveToLane(task, "In Progress");
+      return task;
     },
   };
 }
 ```
 
-- The route NEVER contains business logic or database queries.
-- The service NEVER accesses `req`, `res`, or sends HTTP responses.
-
 ### 4.3 Dependency Injection
 
-- Services are factory functions that receive `Db` and optionally other services as parameters.
-- No IoC container needed — simple function composition.
+- Use constructor injection or factory functions (no complex IoC container).
+- Each service receives its dependencies as parameters, facilitating testing.
+- Repositories receive `Db`; services receive repositories and other services.
 
 ```typescript
-// ✅ Service composition
-export function heartbeatService(db: Db) {
-  const tasks = taskService(db);
-  const secrets = secretService(db);
-  return {
-    async invoke(agentId: string) {
-      // Uses tasks and secrets services internally
-    },
-  };
-}
+// ✅ Composition at app startup
+const db = createDb(databaseUrl);
+const taskRepo = createTaskRepository(db);
+const agentRepo = createAgentRepository(db);
+const secretRepo = createSecretRepository(db);
+const fileSync = createTaskFileSync(tasksDir);
+const taskService = createTaskService({ taskRepository: taskRepo, fileSync });
+const agentService = createAgentService({ agentRepository: agentRepo });
+const secretService = createSecretService({ secretRepository: secretRepo, masterKey });
+const heartbeatService = createHeartbeatService({ taskService, agentService, secretService });
 ```
 
 ### 4.4 Error Handling
@@ -385,8 +574,8 @@ export function heartbeatService(db: Db) {
 
 ### 4.5 Validation
 
-- Validate ALL inputs at the system boundary (route) with Zod.
-- Zod schemas live in `@colmena/shared` (shared between server and UI):
+- Validate ALL inputs at the system boundary (controller) with Zod.
+- Zod schemas live in `@colmena/shared` (shared between server and UI) or in the module's `<module>.schema.ts`:
 
 ```typescript
 // packages/shared/src/validators/task.ts
@@ -566,9 +755,17 @@ export function buildTask(overrides?: Partial<Task>): Task {
 ### 7.4 Running Tests
 
 ```bash
-pnpm test:run           # Run all tests
-pnpm test               # Watch mode
-pnpm test:coverage      # Coverage report
+# Unit tests (inside Docker)
+docker compose -f docker-compose.test.yml run --rm test-server pnpm test:unit
+
+# Full test suite (with ephemeral DB)
+docker compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from test-server
+
+# Watch mode during development
+docker compose -f docker-compose.dev.yml exec server pnpm test:watch
+
+# Coverage report
+docker compose -f docker-compose.test.yml run --rm test-server pnpm test:coverage
 ```
 
 ---
@@ -621,26 +818,35 @@ Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `buil
 
 ---
 
-## 9. Database — Drizzle ORM
+## 9. Database — Drizzle ORM + PostgreSQL
 
-### 9.1 Schema Conventions
+### 9.1 Database Setup
+
+- PostgreSQL 17 runs in Docker (both dev and production).
+- Connection via `DATABASE_URL` environment variable.
+- Drizzle ORM with `postgres-js` driver.
+- No embedded Postgres — Docker provides the database in all environments.
+
+### 9.2 Schema Conventions
 
 - One file per table in `packages/db/src/schema/`.
 - UUID primary keys with `defaultRandom()`.
 - All timestamps with timezone: `timestamp("created_at", { withTimezone: true })`.
 - JSONB for flexible/polymorphic fields (adapter config, metadata, context snapshots).
-- Company-scoped FKs are NOT used (single workspace). Foreign keys reference `agents`, `tasks`, etc. directly.
+- Single workspace — no company-scoped FKs. Foreign keys reference `agents`, `tasks`, etc. directly.
 - Index naming: `{table}_{columns}_idx` (e.g., `tasks_status_idx`, `agents_name_idx`).
 
-### 9.2 Migrations
+### 9.3 Migrations
 
-- Generate: `pnpm db:generate` (after schema changes).
-- Apply: `pnpm db:migrate` (or auto on startup for embedded Postgres).
+- Generate: `docker compose -f docker-compose.dev.yml exec server pnpm db:generate`
+- Apply: `docker compose -f docker-compose.dev.yml exec server pnpm db:migrate`
+- Auto-apply on startup is acceptable for development.
 - Never hand-edit generated migration files.
 - Migration files are committed to the repository.
 
-### 9.3 Query Patterns
+### 9.4 Query Patterns
 
+- All Drizzle queries live in **repository** files, never in services or controllers.
 - Use Drizzle's query builder for standard CRUD.
 - Use `sql` template literal for complex aggregations.
 - Use `db.transaction()` for multi-table atomic operations.
@@ -679,16 +885,18 @@ Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `buil
 
 When Claude Code generates or modifies code in this project:
 
-1. **Before writing code**, verify it complies with the architecture rules from the corresponding section.
-2. **All new code includes tests.** No production code without associated tests.
-3. **Respect the monorepo structure** (`server/`, `ui/`, `packages/db/`, `packages/shared/`).
+1. **Before writing code**, verify it complies with the architecture rules from the corresponding section (backend or frontend).
+2. **All new code includes tests.** No production code is generated without its associated test.
+3. **Respect the monorepo structure** (`server/src/modules/`, `ui/`, `packages/db/`, `packages/shared/`).
 4. **Do not generate `any`**, `@ts-ignore`, non-null assertions, or castings without justification.
-5. **Validate inputs with Zod** at the route layer.
-6. **Services use Drizzle directly** — no repository layer.
+5. **Validate inputs with Zod** at the controller layer.
+6. **Respect the layered architecture**: controller → service → repository. Services never use Drizzle directly.
 7. **Follow Conventional Commits** in commit messages.
 8. **Run lint and type-check** before proposing code as finished.
 9. **Do not install dependencies** without consulting. Prefer already established tools.
 10. **If a user request violates these rules**, inform the user and propose an alternative.
+11. **All services must be containerized.** Any new service, database, or tool must have its own Docker configuration and be added to `docker-compose.dev.yml`.
+12. **Never propose commands that require local installation** of databases, runtimes, or services. Everything runs through Docker Compose.
 
 ---
 
@@ -697,14 +905,20 @@ When Claude Code generates or modifies code in this project:
 Before considering any task complete, verify:
 
 - [ ] Code compiles without errors (`pnpm typecheck`).
-- [ ] ESLint passes with zero warnings.
+- [ ] ESLint passes with zero warnings (`eslint --max-warnings=0`).
 - [ ] Tests pass and cover the main paths.
 - [ ] No unjustified `any`, `@ts-ignore`, `!`, or `as`.
-- [ ] Inputs are validated with Zod at the boundary.
-- [ ] Monorepo structure is respected.
+- [ ] Inputs are validated with Zod at the controller boundary.
+- [ ] Layered architecture respected: controller → service → repository.
+- [ ] Monorepo structure is respected (`server/src/modules/`, `packages/`).
 - [ ] Names follow conventions (camelCase, PascalCase, etc.).
 - [ ] No secrets or credentials in the code.
-- [ ] React components are accessible.
+- [ ] React components are accessible (semantics, labels, contrast).
 - [ ] Commit message follows Conventional Commits.
+- [ ] PR has a reasonable size (<400 lines).
 - [ ] `.env.example` is updated if new environment variables were added.
 - [ ] Drizzle schema changes have a generated migration.
+- [ ] New services are containerized and added to Docker Compose.
+- [ ] Dockerfiles follow multi-stage build pattern for production.
+- [ ] Docker images run as non-root user.
+- [ ] Health checks are defined for all services.

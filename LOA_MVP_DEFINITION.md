@@ -1,19 +1,19 @@
-# Colmena MVP — AI Software Teams
+# Loa MVP — AI Software Teams
 
-> **Colmena** (Spanish for "beehive") — a standalone tool to create and orchestrate AI software teams.
+> **Loa** (Spanish for "beehive") — a standalone tool to create and orchestrate AI software teams.
 
 ---
 
 ## 1. Vision
 
-Colmena orchestrates a team of AI agents to work on software projects. You define goals, break them into epics and tasks, assign agents, and Colmena coordinates their execution via heartbeats. Tasks.md provides the task board UI. Colmena provides the agent orchestration engine.
+Loa orchestrates a team of AI agents to work on software projects. You define goals, break them into epics and tasks, assign agents, and Loa coordinates their execution via heartbeats. Tasks.md provides the task board UI. Loa provides the agent orchestration engine.
 
-**What Colmena is:**
+**What Loa is:**
 - A control plane for AI agent teams
 - A heartbeat-driven execution engine
 - A task-to-agent coordination layer
 
-**What Colmena is NOT (for MVP):**
+**What Loa is NOT (for MVP):**
 - Not multi-company (single workspace)
 - Not a cost/token tracker
 - Not an org hierarchy manager
@@ -29,7 +29,7 @@ Colmena orchestrates a team of AI agents to work on software projects. You defin
 │  Kanban board: Draft→Backlog→Todo→...→Done       │
 │  Reads/writes markdown files on shared volume     │
 ├──────────────────────────────────────────────────┤
-│  Colmena Server (Docker container)               │
+│  Loa Server (Docker container)               │
 │  ┌─────────┐ ┌───────────┐ ┌──────────────────┐ │
 │  │ REST API│ │ Scheduler │ │ Heartbeat Engine │ │
 │  └─────────┘ └───────────┘ └──────────────────┘ │
@@ -37,13 +37,13 @@ Colmena orchestrates a team of AI agents to work on software projects. You defin
 │  │ Secrets │ │ Task Sync │ │ Approval Gate    │ │
 │  └─────────┘ └───────────┘ └──────────────────┘ │
 ├──────────────────────────────────────────────────┤
-│  Colmena Web UI (Docker container)               │
+│  Loa Web UI (Docker container)               │
 │  Agent management + Run viewer                   │
 ├──────────────────────────────────────────────────┤
 │  PostgreSQL 17 (Docker container)                │
 ├──────────────────────────────────────────────────┤
 │  Shared Volumes                                  │
-│  ├── /tasks/  ← shared Colmena ↔ Tasks.md       │
+│  ├── /tasks/  ← shared Loa ↔ Tasks.md       │
 │  │   ├── Draft/                                  │
 │  │   ├── Backlog/                                │
 │  │   ├── Todo/                                   │
@@ -54,7 +54,7 @@ Colmena orchestrates a team of AI agents to work on software projects. You defin
 └──────────────────────────────────────────────────┘
 ```
 
-**Key integration:** All services run in Docker. Colmena and Tasks.md share the same `/tasks/` volume. Colmena writes task markdown files; Tasks.md renders them as a kanban board. Moving a card in Tasks.md moves the file between lane directories. Colmena watches the filesystem for changes.
+**Key integration:** All services run in Docker. Loa and Tasks.md share the same `/tasks/` volume. Loa writes task markdown files; Tasks.md renders them as a kanban board. Moving a card in Tasks.md moves the file between lane directories. Loa watches the filesystem for changes.
 
 ---
 
@@ -172,21 +172,21 @@ Added RS256 support. Tests passing. Still need refresh token logic.
 
 ### 4.3 Filesystem ↔ Database Sync
 
-**Colmena → Filesystem:**
+**Loa → Filesystem:**
 - Creating a task → writes `.md` file to the appropriate lane directory
 - Updating task status → moves file between directories
 - Agent adding notes → appends to the "Agent Notes" section
 
-**Filesystem → Colmena (via watcher):**
-- Moving a card in Tasks.md (file moved between directories) → Colmena detects and updates DB status
-- Editing task content in Tasks.md → Colmena detects and updates DB
+**Filesystem → Loa (via watcher):**
+- Moving a card in Tasks.md (file moved between directories) → Loa detects and updates DB status
+- Editing task content in Tasks.md → Loa detects and updates DB
 
 **Sync strategy:**
 - Use `chokidar` (or `fs.watch`) to watch `/tasks/` recursively
 - On file change: parse frontmatter, update DB record
 - On file move: detect lane change, update status in DB
 - Debounce: 500ms to avoid rapid-fire updates
-- **Colmena is the source of truth** for metadata (assignee, approval, IDs). Tasks.md is a view.
+- **Loa is the source of truth** for metadata (assignee, approval, IDs). Tasks.md is a view.
 
 ### 4.4 Lane ↔ Status Mapping
 
@@ -230,13 +230,13 @@ Agent heartbeat → sees approved task → checkout → work
 - Task approval status is stored in the frontmatter (`approval: pending/approved/rejected`)
 - In the Tasks.md UI, pending tasks show `⏳` in the title, approved show `✅`
 - Agents during heartbeat: only checkout tasks where `approval: approved`
-- Operator approves via Colmena web UI or by editing frontmatter directly in Tasks.md
+- Operator approves via Loa web UI or by editing frontmatter directly in Tasks.md
 
 ### 5.4 Sub-Task Approvals
 
 When an agent creates a sub-task:
 1. Agent writes the new task file to `Todo/` with `approval: pending`
-2. Colmena detects the new file
+2. Loa detects the new file
 3. Operator reviews and approves (or rejects) via UI
 4. If approved, the creating agent (or another) picks it up on next heartbeat
 
@@ -258,7 +258,7 @@ When an agent creates a sub-task:
     model: "claude-sonnet-4-6",
     cwd: "/workspace/my-project",   // Working directory for code
     maxTurnsPerRun: 80,
-    instructionsPath: "/workspace/my-project/.colmena/agents/backend-engineer/AGENTS.md",
+    instructionsPath: "/workspace/my-project/.loa/agents/backend-engineer/AGENTS.md",
     env: {
       GITHUB_TOKEN: { type: "secret_ref", secretId: "...", scope: "agent" },
       NODE_ENV: { type: "plain", value: "development" },
@@ -279,9 +279,9 @@ When an agent creates a sub-task:
 Each agent gets an instructions file that teaches it how to behave:
 
 ```markdown
-# Backend Engineer — Colmena Agent
+# Backend Engineer — Loa Agent
 
-You are a backend engineer working in a Colmena-managed team.
+You are a backend engineer working in a Loa-managed team.
 
 ## Identity
 - Name: backend-engineer
@@ -344,13 +344,13 @@ Trigger (timer/assignment/manual)
 ### 7.2 Environment Variables Injected
 
 ```
-COLMENA_AGENT_ID=<agent-uuid>
-COLMENA_AGENT_NAME=<agent-name>
-COLMENA_API_URL=http://localhost:3100/api
-COLMENA_API_KEY=<short-lived-jwt>
-COLMENA_RUN_ID=<run-uuid>
-COLMENA_TASK_ID=<task-uuid>           # If triggered by assignment
-COLMENA_WAKE_REASON=<reason>          # timer, assignment, manual
+LOA_AGENT_ID=<agent-uuid>
+LOA_AGENT_NAME=<agent-name>
+LOA_API_URL=http://localhost:3100/api
+LOA_API_KEY=<short-lived-jwt>
+LOA_RUN_ID=<run-uuid>
+LOA_TASK_ID=<task-uuid>           # If triggered by assignment
+LOA_WAKE_REASON=<reason>          # timer, assignment, manual
 ```
 
 ### 7.3 Run Tracking
@@ -420,7 +420,7 @@ POST /api/tasks/{id}/checkout
 ### 8.2 Storage
 
 - Encrypted at rest using AES-256-GCM
-- Local master key auto-generated at `~/.colmena/secrets/master.key`
+- Local master key auto-generated at `~/.loa/secrets/master.key`
 - Versioned: rotate without breaking agents (`version: "latest"`)
 - SHA-256 hash of plaintext stored (for change detection)
 
@@ -675,7 +675,7 @@ GET    /api/dashboard                       # Health summary
 
 ---
 
-## 11. Web UI (Colmena)
+## 11. Web UI (Loa)
 
 Minimal React UI focused on what Tasks.md doesn't cover:
 
@@ -697,11 +697,11 @@ Minimal React UI focused on what Tasks.md doesn't cover:
 - TanStack Query
 - WebSocket for real-time run streaming
 
-### 11.3 What's NOT in Colmena UI
+### 11.3 What's NOT in Loa UI
 
 - Task kanban board → **Tasks.md**
 - Task creation/editing → **Tasks.md** (or API)
-- Task approval → Colmena UI (button on dashboard) **or** edit frontmatter in Tasks.md
+- Task approval → Loa UI (button on dashboard) **or** edit frontmatter in Tasks.md
 
 ---
 
@@ -731,15 +731,15 @@ Same pattern as Paperclip: Node.js `EventEmitter`, no external broker needed.
 ### 13.1 Commands
 
 ```bash
-colmena init                     # First-run setup wizard
-colmena start                    # Start the server
-colmena doctor                   # Diagnostic checks
-colmena agent list               # List agents
-colmena agent create <name>      # Create agent interactively
-colmena agent invoke <name>      # Trigger heartbeat manually
-colmena task list                # List tasks
-colmena task approve <id>        # Approve a task
-colmena secret set <name>        # Set a secret interactively
+loa init                     # First-run setup wizard
+loa start                    # Start the server
+loa doctor                   # Diagnostic checks
+loa agent list               # List agents
+loa agent create <name>      # Create agent interactively
+loa agent invoke <name>      # Trigger heartbeat manually
+loa task list                # List tasks
+loa task approve <id>        # Approve a task
+loa secret set <name>        # Set a secret interactively
 ```
 
 ### 13.2 Tech
@@ -763,7 +763,7 @@ services:
       - ./packages:/app/packages
       - ./skills:/app/skills
       - /app/node_modules
-      - colmena_data:/colmena
+      - loa_data:/loa
       - ./tasks:/tasks
       - ./workspace:/workspace
     ports:
@@ -792,13 +792,13 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: colmena
-      POSTGRES_PASSWORD: colmena
-      POSTGRES_DB: colmena
+      POSTGRES_USER: loa
+      POSTGRES_PASSWORD: loa
+      POSTGRES_DB: loa
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U colmena"]
+      test: ["CMD-SHELL", "pg_isready -U loa"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -810,38 +810,38 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TITLE=Colmena Board
+      - TITLE=Loa Board
     volumes:
       - ./tasks:/tasks
 
 volumes:
   db_data:
-  colmena_data:
+  loa_data:
 ```
 
 All services run in Docker. Server, UI, DB, and Tasks.md share volumes for tasks and workspace data. `docker compose -f docker-compose.dev.yml up` starts everything.
 
 ---
 
-## 15. Colmena Skill (Agent Protocol)
+## 15. Loa Skill (Agent Protocol)
 
-A built-in skill that teaches agents how to work within Colmena:
+A built-in skill that teaches agents how to work within Loa:
 
 ```markdown
 ---
-name: colmena
+name: loa
 description: >
-  Interact with the Colmena API to manage tasks, update status,
+  Interact with the Loa API to manage tasks, update status,
   and coordinate with the team.
 ---
 
-# Colmena Agent Skill
+# Loa Agent Skill
 
 You work in **heartbeats** — short execution windows.
 
 ## Authentication
 
-Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
+Env vars: LOA_AGENT_ID, LOA_API_URL, LOA_API_KEY, LOA_RUN_ID
 
 ## Heartbeat Procedure
 
@@ -868,7 +868,7 @@ Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
 ## 16. Data Directory Layout
 
 ```
-/colmena/                          # COLMENA_HOME (Docker volume)
+/loa/                          # LOA_HOME (Docker volume)
 ├── config.json                    # Server configuration
 ├── secrets/
 │   └── master.key                 # Encryption master key (0600)
@@ -877,7 +877,7 @@ Env vars: COLMENA_AGENT_ID, COLMENA_API_URL, COLMENA_API_KEY, COLMENA_RUN_ID
     └── {agentId}/
         └── instructions/          # Agent AGENTS.md files
 
-/tasks/                            # Shared volume (Colmena ↔ Tasks.md)
+/tasks/                            # Shared volume (Loa ↔ Tasks.md)
 ├── Draft/
 ├── Backlog/
 ├── Todo/
@@ -921,7 +921,7 @@ All data directories are Docker volumes — no local filesystem dependency.
 16. **Heartbeat engine** — trigger → enqueue → execute → record pipeline
 17. **Run tracking** — heartbeat_runs + heartbeat_run_events (repository + service)
 18. **Session persistence** — agent_runtime_state repository, save/restore across heartbeats
-19. **Colmena skill** — built-in agent protocol instructions
+19. **Loa skill** — built-in agent protocol instructions
 20. **Scheduler** — timer-based heartbeat triggering
 
 ### Phase 4: UI + Polish (Week 4-5)
@@ -968,7 +968,7 @@ The MVP is done when:
 1. ✅ `docker compose -f docker-compose.dev.yml up` starts the full stack (server, UI, DB, Tasks.md)
 2. ✅ Operator can define Goals → Epics → Tasks
 3. ✅ Tasks appear as markdown files in Tasks.md kanban board
-4. ✅ Moving cards in Tasks.md updates Colmena status
+4. ✅ Moving cards in Tasks.md updates Loa status
 5. ✅ Operator can create and configure Claude Code agents
 6. ✅ Operator can approve tasks before agents work on them
 7. ✅ Agents wake up on heartbeats, check assignments, checkout tasks, do work, update status

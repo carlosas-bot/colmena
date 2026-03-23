@@ -1,4 +1,4 @@
-# Technical Requirements & Best Practices — Colmena
+# Technical Requirements & Best Practices — Loa
 
 > **Purpose:** This document acts as guardrails for Claude Code. All code generation, refactoring, or review MUST comply with the rules defined here. If a rule conflicts with a user request, Claude Code must warn before proceeding.
 
@@ -49,7 +49,7 @@ The entire development and production environment MUST be containerized. A new d
 │   │   └── Dockerfile.dev          # Development with hot reload
 │   └── nginx/
 │       └── nginx.conf              # Reverse proxy (production)
-├── docker-compose.yml              # Production: Colmena + Tasks.md + Postgres + nginx
+├── docker-compose.yml              # Production: Loa + Tasks.md + Postgres + nginx
 ├── docker-compose.dev.yml          # Development: hot reload, bind mounts
 ├── docker-compose.test.yml         # Test environment (ephemeral DB)
 ├── .dockerignore
@@ -78,8 +78,8 @@ WORKDIR /app
 RUN corepack enable
 COPY --from=deps /app /app
 COPY . .
-RUN pnpm --filter @colmena/ui build
-RUN pnpm --filter @colmena/server build
+RUN pnpm --filter @loa/ui build
+RUN pnpm --filter @loa/server build
 
 # ── Stage 3: Production ─────────────────────────────────────────
 FROM node:22-alpine AS production
@@ -88,14 +88,14 @@ RUN apk add --no-cache ca-certificates curl git \
   && corepack enable \
   && addgroup -g 1001 appgroup && adduser -u 1001 -G appgroup -s /bin/sh -D appuser \
   && npm install --global @anthropic-ai/claude-code@latest \
-  && mkdir -p /colmena && chown appuser:appgroup /colmena
+  && mkdir -p /loa && chown appuser:appgroup /loa
 COPY --from=build --chown=appuser:appgroup /app/dist ./dist
 COPY --from=build --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --from=build --chown=appuser:appgroup /app/package.json ./
 COPY --from=build --chown=appuser:appgroup /app/skills ./skills
 
 ENV NODE_ENV=production
-VOLUME ["/colmena", "/tasks", "/workspace"]
+VOLUME ["/loa", "/tasks", "/workspace"]
 EXPOSE 3100
 
 USER appuser
@@ -159,11 +159,11 @@ services:
       - ./packages:/app/packages               # Hot reload
       - ./skills:/app/skills                   # Skills
       - /app/node_modules                      # Prevent overwrite
-      - colmena_data:/colmena
+      - loa_data:/loa
       - ./tasks:/tasks
       - ./workspace:/workspace
     ports:
-      - "${COLMENA_PORT:-3100}:3100"
+      - "${LOA_PORT:-3100}:3100"
     env_file: .env
     depends_on:
       db:
@@ -188,13 +188,13 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: ${DB_USER:-colmena}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-colmena}
-      POSTGRES_DB: ${DB_NAME:-colmena}
+      POSTGRES_USER: ${DB_USER:-loa}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-loa}
+      POSTGRES_DB: ${DB_NAME:-loa}
     ports:
       - "${DB_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-colmena}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-loa}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -206,13 +206,13 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TITLE=Colmena Board
+      - TITLE=Loa Board
     volumes:
       - ./tasks:/tasks
 
 volumes:
   db_data:
-  colmena_data:
+  loa_data:
 ```
 
 #### Production (`docker-compose.yml`)
@@ -224,13 +224,13 @@ services:
       context: .
       dockerfile: docker/server/Dockerfile
     ports:
-      - "${COLMENA_PORT:-3100}:3100"
+      - "${LOA_PORT:-3100}:3100"
     environment:
-      DATABASE_URL: postgres://${DB_USER:-colmena}:${DB_PASSWORD:-colmena}@db:5432/${DB_NAME:-colmena}
+      DATABASE_URL: postgres://${DB_USER:-loa}:${DB_PASSWORD:-loa}@db:5432/${DB_NAME:-loa}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      COLMENA_HOME: /colmena
+      LOA_HOME: /loa
     volumes:
-      - colmena_data:/colmena
+      - loa_data:/loa
       - ./tasks:/tasks
       - ./workspace:/workspace
     depends_on:
@@ -247,11 +247,11 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: ${DB_USER:-colmena}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-colmena}
-      POSTGRES_DB: ${DB_NAME:-colmena}
+      POSTGRES_USER: ${DB_USER:-loa}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-loa}
+      POSTGRES_DB: ${DB_NAME:-loa}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-colmena}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-loa}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -263,7 +263,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - TITLE=Colmena Board
+      - TITLE=Loa Board
     volumes:
       - ./tasks:/tasks
     depends_on:
@@ -272,7 +272,7 @@ services:
 
 volumes:
   db_data:
-  colmena_data:
+  loa_data:
 ```
 
 #### Docker Compose rules
@@ -283,7 +283,7 @@ volumes:
 - All port mappings use environment variables with sensible defaults.
 - No hardcoded credentials — use `.env` file (gitignored) with `.env.example` as template.
 - Infrastructure services (DB) use official Alpine images with a pinned major version.
-- Colmena and Tasks.md share the `/tasks` volume for filesystem-based task sync.
+- Loa and Tasks.md share the `/tasks` volume for filesystem-based task sync.
 - The `/workspace` volume is where agents' code projects live.
 - Development uses bind mounts for hot reload; production uses COPY in Dockerfile.
 
@@ -326,7 +326,7 @@ services:
     environment:
       POSTGRES_USER: test
       POSTGRES_PASSWORD: test
-      POSTGRES_DB: colmena_test
+      POSTGRES_DB: loa_test
     tmpfs: /var/lib/postgresql/data     # In-memory for speed
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U test"]
@@ -408,7 +408,7 @@ docker compose -f docker-compose.dev.yml up -d --build
 - Group imports in this order (separated by blank lines):
   1. Node built-ins (`node:fs`, `node:crypto`).
   2. External libraries (express, drizzle-orm, react…).
-  3. Internal aliases (`@colmena/shared`, `@colmena/db`…).
+  3. Internal aliases (`@loa/shared`, `@loa/db`…).
   4. Relative imports from the same module.
   5. Types (with `import type`).
 - Use `import type` whenever importing exclusively a type.
@@ -420,7 +420,7 @@ docker compose -f docker-compose.dev.yml up -d --build
 ### 4.1 Monorepo Structure
 
 ```
-colmena/
+loa/
 ├── server/                      # Express.js API server
 │   ├── src/
 │   │   ├── modules/             # Domain modules (feature-based)
@@ -474,8 +474,8 @@ colmena/
 │       │   └── constants.ts     # Status enums, role lists, etc.
 │       └── package.json
 │
-├── skills/                      # Built-in Colmena agent skill
-│   └── colmena/
+├── skills/                      # Built-in Loa agent skill
+│   └── loa/
 │       └── SKILL.md
 │
 ├── docker/                      # Docker configurations
@@ -575,7 +575,7 @@ const heartbeatService = createHeartbeatService({ taskService, agentService, sec
 ### 4.5 Validation
 
 - Validate ALL inputs at the system boundary (controller) with Zod.
-- Zod schemas live in `@colmena/shared` (shared between server and UI) or in the module's `<module>.schema.ts`:
+- Zod schemas live in `@loa/shared` (shared between server and UI) or in the module's `<module>.schema.ts`:
 
 ```typescript
 // packages/shared/src/validators/task.ts
